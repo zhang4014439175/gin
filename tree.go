@@ -151,9 +151,11 @@ func (n *node) incrementChildPrio(pos int) int {
 // Not concurrency-safe!
 func (n *node) addRoute(path string, handlers HandlersChain) {
 	fullPath := path
+	// 每有一个新路由经过此节点，priority 都要加 1
 	n.priority++
 
 	// Empty tree
+	// 加入当前节点为 root 且未注册过子节点，则直接插入由并返回
 	if len(n.path) == 0 && len(n.children) == 0 {
 		n.insertChild(path, fullPath, handlers)
 		n.nType = root
@@ -162,37 +164,53 @@ func (n *node) addRoute(path string, handlers HandlersChain) {
 
 	parentFullPathIndex := 0
 
+	// 外层 for 循环断点
 walk:
 	for {
 		// Find the longest common prefix.
 		// This also implies that the common prefix contains no ':' or '*'
 		// since the existing key can't contain those chars.
+		// 获取 node.path 和待插入路由 path 的最长公共前缀长度
 		i := longestCommonPrefix(path, n.path)
 
+		// 倘若最长公共前缀长度小于 node.path 的长度，代表 node 需要分裂
+		// 举例而言：node.path = search，此时要插入的 path 为 see
+		// 最长公共前缀长度就是 2，len(n.path) = 6
+		// 需要分裂为  se -> arch
+		//                -> e
 		// Split edge
 		if i < len(n.path) {
+			// 原节点分裂后的后半部分，对应于上述例子的 arch 部分
 			child := node{
 				path:      n.path[i:],
 				wildChild: n.wildChild,
 				nType:     static,
-				indices:   n.indices,
-				children:  n.children,
-				handlers:  n.handlers,
-				priority:  n.priority - 1,
-				fullPath:  n.fullPath,
+				// 原本 search 对应的参数都要托付给 arch
+				indices:  n.indices,
+				children: n.children,
+				handlers: n.handlers,
+				// 新路由 see 进入时，先将 search 的 priority 加 1 了，此时需要扣除 1 并赋给 arch
+				priority: n.priority - 1,
+				fullPath: n.fullPath,
 			}
 
+			// 先建立 search -> arch 的数据结构，后续调整 search 为 se
 			n.children = []*node{&child}
 			// []byte for proper unicode char conversion, see #65
+			// 设置 se 的 indice 首字母为 a
 			n.indices = bytesconv.BytesToString([]byte{n.path[i]})
+			// 调整 search 为 se
 			n.path = path[:i]
+			// search 的 handlers 都托付给 arch 了，se 本身没有 handlers
 			n.handlers = nil
 			n.wildChild = false
 			n.fullPath = fullPath[:parentFullPathIndex+i]
 		}
 
 		// Make new node a child of this node
+		// 最长公共前缀长度小于 path，正如 se 之于 see
 		if i < len(path) {
+			// path see 扣除公共前缀 se，剩余 e
 			path = path[i:]
 			c := path[0]
 
@@ -205,6 +223,7 @@ walk:
 			}
 
 			// Check if a child with the next path byte exists
+			// 根据 node.indices，辅助判断，其子节点中是否与当前 path 还存在公共前缀
 			for i, max := 0, len(n.indices); i < max; i++ {
 				if c == n.indices[i] {
 					parentFullPathIndex += len(n.path)
@@ -214,6 +233,9 @@ walk:
 				}
 			}
 
+			// node 已经不存在和 path 再有公共前缀的子节点了，则需要将 path 包装成一个新 child node 进行插入
+			// node 的 indices 新增 path 的首字母
+			// 把新路由包装成一个 child node，对应的 path 和 handlers 会在 node.insertChild 中赋值
 			// Otherwise insert it
 			if c != ':' && c != '*' && n.nType != catchAll {
 				// []byte for proper unicode char conversion, see #65
@@ -221,8 +243,10 @@ walk:
 				child := &node{
 					fullPath: fullPath,
 				}
+				// 新 child node append 到 node.children 数组中
 				n.addChild(child)
 				n.incrementChildPrio(len(n.indices) - 1)
+				// 令 node 指向新插入的 child，并在 node.insertChild 方法中进行 path 和 handlers 的赋值操作
 				n = child
 			} else if n.wildChild {
 				// inserting a wildcard node, need to check if it conflicts with the existing wildcard
@@ -256,6 +280,8 @@ walk:
 		}
 
 		// Otherwise add handle to current node
+		// 此处的分支是，path 恰好是其与 node.path 的公共前缀，则直接复制 handlers 即可
+		// 例如 se 之于 search
 		if n.handlers != nil {
 			panic("handlers are already registered for path '" + fullPath + "'")
 		}
@@ -426,13 +452,18 @@ func (n *node) getValue(path string, params *Params, skippedNodes *[]skippedNode
 walk: // Outer loop for walking the tree
 	for {
 		prefix := n.path
+		// 待匹配 path 长度大于 node.path
 		if len(path) > len(prefix) {
+			// node.path 长度 < path，且前缀匹配上
 			if path[:len(prefix)] == prefix {
+				// path 取为后半部分
 				path = path[len(prefix):]
 
 				// Try all the non-wildcard children first by matching the indices
+				// 遍历当前 node.indices，找到可能和 path 后半部分可能匹配到的 child node
 				idxc := path[0]
 				for i, c := range []byte(n.indices) {
+					// 找到了首字母匹配的 child node
 					if c == idxc {
 						//  strings.HasPrefix(n.children[len(n.children)-1].path, ":") == n.wildChild
 						if n.wildChild {
@@ -452,7 +483,7 @@ walk: // Outer loop for walking the tree
 								paramsCount: globalParamsCount,
 							}
 						}
-
+						// 将 n 指向 child node，调到 walk 断点开始下一轮处理
 						n = n.children[i]
 						continue walk
 					}
@@ -589,6 +620,7 @@ walk: // Outer loop for walking the tree
 			}
 		}
 
+		// 倘若 path 正好等于 node.path，说明已经找到目标
 		if path == prefix {
 			// If the current path does not equal '/' and the node does not have a registered handle and the most recently matched node has a child node
 			// the current node needs to roll back to last valid skippedNode
@@ -610,6 +642,7 @@ walk: // Outer loop for walking the tree
 			}
 			// We should have reached the node containing the handle.
 			// Check if this node has a handle registered.
+			// 取出对应的 handlers 进行返回
 			if value.handlers = n.handlers; value.handlers != nil {
 				value.fullPath = n.fullPath
 				return value
@@ -641,7 +674,7 @@ walk: // Outer loop for walking the tree
 
 			return value
 		}
-
+		// 倘若 path 与 node.path 已经没有公共前缀，说明匹配失败
 		// Nothing found. We can recommend to redirect to the same URL with an
 		// extra trailing slash if a leaf exists for that path
 		value.tsr = path == "/" ||
